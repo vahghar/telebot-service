@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
+from telegram.constants import ChatAction 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
@@ -96,7 +97,8 @@ async def show_metrics_callback(update: Update, context: ContextTypes.DEFAULT_TY
     """
     query = update.callback_query
     #await query.answer("Fetching...")
-
+    await query.answer()
+    #await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
     metrics_text = await get_metrics_text()
 
     permanent_keyboard = [[KeyboardButton("📊 Sentient Metrics")]]
@@ -157,4 +159,3 @@ def remove_user_endpoint(chat_id: int, db: Session = Depends(get_db)):
     if not was_removed:
         raise HTTPException(status_code=404, detail="User not found")
     return None
-
