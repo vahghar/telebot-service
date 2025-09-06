@@ -130,7 +130,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def show_metrics_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the 'show_metrics' button press by fetching and displaying APY data."""
     query = update.callback_query
-    await query.answer("Fetching metrics...")  # Acknowledge the button press
+    #await query.answer("Fetching metrics...")  # Acknowledge the button press
     
     try:
         async with httpx.AsyncClient() as client:
