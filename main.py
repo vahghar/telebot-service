@@ -44,7 +44,9 @@ def get_db():
 
 # --- TELEGRAM BOT SETUP ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-VAULT_API_URL = "https://yield-allocator-backend-production.up.railway.app/api/vault/price/"
+VAULT_API_URL = os.getenv("VAULT_API_URL")
+YIELD_API_URL = os.getenv("YIELD_API_URL")
+REBALANCE_CHECK_INTERVAL_SECONDS = int(os.getenv("REBALANCE_CHECK_INTERVAL_SECONDS", 60))
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set!")
@@ -248,9 +250,79 @@ async def show_metrics_from_text(update: Update, context: ContextTypes.DEFAULT_T
     # Then, send the final message in one go.
     await update.message.reply_text(text=metrics_text, parse_mode='HTML')
 
+def format_rebalancing_message(rebalance_event: dict) -> str | None:
+    """Formats a rebalance event into a notification message."""
+    try:
+        amount = float(rebalance_event['amount_token'])
+        token_symbol = rebalance_event['token_symbol']
+        from_protocol = rebalance_event['from_protocol']
+        to_protocol = rebalance_event['to_protocol']
+        tx_hash = rebalance_event['deposit_transaction']['transaction_hash']
+        strategy_summary = rebalance_event.get('strategy_summary', 'No summary provided.').strip().strip('"')
+        tx_link = f"https://hyperevmscan.io/tx/0x{tx_hash}"
+        message = (
+            f"⚡️ **Yield Optimized**\n\n"
+            f"A {amount:.6f} {token_symbol} position was moved to capture higher yield.\n\n"
+            f"**From:** `{from_protocol}`\n"
+            f"**To:** `{to_protocol}`\n\n"
+            f"**Reason:**\n"
+            f"> {strategy_summary}\n\n"
+            f"Automated by Sentient.\n"
+            f"[View Transaction]({tx_link})"
+        )
+        return message
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error(f"Failed to format rebalance message: {e}")
+        return None
 
 async def handle_generic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("I don't understand that. Please use the '📊 Sentient Metrics' button.")
+
+async def check_and_notify_rebalance(application: Application):
+    """The core logic that checks for new rebalances and triggers notifications."""
+    logger.info("BACKGROUND TASK: Checking for new rebalance event...")
+    api_url = f"{YIELD_API_URL}/api/vault/rebalances/combined/"
+    params = {"page_size": 1}
+    db = next(get_db())
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(api_url, params=params, timeout=20)
+            if response.status_code != 200:
+                logger.error(f"Yield API Error: {response.status_code}")
+                return
+            latest_event = response.json()[0]
+        
+        latest_rebalance_id = latest_event['rebalance_id']
+
+        # Check if we've already processed this event
+        event_exists = await asyncio.to_thread(crud.get_rebalance_event_by_rebalance_id, db, latest_rebalance_id)
+        if event_exists:
+            logger.info("No new rebalance event found.")
+            return
+
+        logger.info(f"New rebalance event found: {latest_rebalance_id}")
+        message = format_rebalancing_message(latest_event)
+        if message:
+            await broadcast_rebalance_message(application, message)
+            # After sending, save the record to the database
+            event_to_create = schemas.RebalanceEventCreate(
+                rebalance_id=latest_rebalance_id,
+                transaction_hash=latest_event['deposit_transaction']['transaction_hash']
+            )
+            await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
+            logger.info(f"Successfully processed and saved event {latest_rebalance_id}.")
+
+    except (httpx.RequestError, IndexError, KeyError) as e:
+        logger.error(f"Error during rebalance check: {e}")
+    finally:
+        db.close()
+
+async def run_rebalance_check_periodically(application: Application):
+    """The background task that runs indefinitely."""
+    while True:
+        await check_and_notify_rebalance(application)
+        logger.info(f"BACKGROUND TASK: Sleeping for {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
+        await asyncio.sleep(REBALANCE_CHECK_INTERVAL_SECONDS)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -266,8 +338,11 @@ async def lifespan(app: FastAPI):
     await application.start()
     await application.updater.start_polling()
     logger.info("Telegram bot is running in the background.")
+    logger.info(f"Starting periodic rebalance checker. Interval: {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
+    rebalance_task = asyncio.create_task(run_rebalance_check_periodically(application))
     yield
     logger.info("FastAPI app shutting down...")
+    rebalance_task.cancel()
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
