@@ -6,3 +6,5 @@ __pycache__
 apy_listener.py
 telebot.py
 abi
+
+load_text.py

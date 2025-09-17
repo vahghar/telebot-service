@@ -4,6 +4,7 @@ import json
 from typing import List
 import logging
 from contextlib import asynccontextmanager
+from database import get_async_db
 
 from fastapi import FastAPI, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -17,6 +18,14 @@ import crud
 import models
 import schemas
 from database import SessionLocal, engine
+
+from functools import lru_cache
+from datetime import datetime
+
+last_fetch = None
+cached_metrics = None
+CACHE_DURATION = 60  
+cache_lock = asyncio.Lock()
 
 # --- DATABASE AND APP SETUP ---
 logging.basicConfig(
@@ -43,7 +52,7 @@ if not TELEGRAM_TOKEN:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handles the /start command by sending a welcome message with an INLINE keyboard."""
     chat_id = update.message.chat_id
-    db = SessionLocal()
+    '''db = SessionLocal()
     try:
         user_schema = schemas.UserCreate(chat_id=chat_id)
         db_user, created = crud.get_or_create_user(db, user_schema)
@@ -55,14 +64,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         else:
             message_text = "👋 Welcome back! Tap the button for the latest metrics."
     finally:
-        db.close()
+        db.close()'''
+    async with get_async_db() as db:
+        user_schema = schemas.UserCreate(chat_id=chat_id)
+        db_user, created = crud.get_or_create_user(db, user_schema)
+        if created:
+            message_text = (
+                "🤖 Welcome to Sentient AI!\n\n"
+                "You are now subscribed. Tap the button below to get your first metrics update."
+            )
+        else:
+            message_text = "👋 Welcome back! Tap the button for the latest metrics."
 
     keyboard = [[InlineKeyboardButton("📊 Sentient Metrics", callback_data='show_metrics')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(message_text, reply_markup=reply_markup)
 
+'''
 async def get_metrics_text() -> str:
     """Fetches data from the API and formats it into a string. Returns an error string on failure."""
+    if cached_metrics and last_fetch and (datetime.now() - last_fetch).seconds < CACHE_DURATION:
+        return cached_metrics
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(VAULT_API_URL)
@@ -89,6 +111,114 @@ async def get_metrics_text() -> str:
     except Exception as e:
         logger.error(f"Failed to get metrics data: {e}", exc_info=True)
         return "😕 Sorry, I couldn't fetch the metrics right now. Please try again later."
+'''
+
+'''
+async def get_metrics_text() -> str:
+    """Fetches data from the API and formats it into a string. Returns an error string on failure."""
+    global last_fetch, cached_metrics
+    async with cache_lock:
+        if cached_metrics and last_fetch and (datetime.now() - last_fetch).total_seconds() < CACHE_DURATION:
+            logger.info("CACHE HIT - returning cached data")
+            return cached_metrics
+    
+    logger.info("CACHE MISS - fetching new data")
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(VAULT_API_URL)
+            response.raise_for_status()
+            vault_data = response.json()
+
+            total_tvl = sum(float(v.get("total_assets", 0)) for v in vault_data if isinstance(v.get("total_assets"), (str, int, float)))
+            tvl_formatted = f"${total_tvl:,.2f}"
+
+            protocol_lines = []
+            if total_tvl > 0:
+                for vault in vault_data:
+                    name = f"{vault.get('protocol', 'N/A')} {vault.get('token', 'N/A')}"
+                    tvl_val = float(vault.get("total_assets", 0))
+                    percent = (tvl_val / total_tvl * 100)
+                    protocol_lines.append(f"• {name}: ${tvl_val:,.2f} ({percent:.1f}%)")
+
+            result = (
+                "<b>📊 Sentient Metrics</b>\n\n"
+                "<b>General Metrics:</b>\n"
+                f"• TVL: {tvl_formatted}\n\n"
+                "<b>Our Distribution:</b>\n" + "\n".join(protocol_lines)
+            )
+            
+            async with cache_lock:
+                cached_metrics = result
+                last_fetch = datetime.now()
+            
+            return result
+            
+    except Exception as e:
+        logger.error(f"Failed to get metrics data: {e}", exc_info=True)
+    
+        async with cache_lock:
+            if cached_metrics:
+                logger.info("API failed, returning stale cached data as fallback")
+                return cached_metrics
+    
+        return "😕 Sorry, I couldn't fetch the metrics right now. Please try again later."
+'''
+
+# In your main.py file, replace the old function with this one.
+
+async def get_metrics_text() -> str:
+    """
+    Fetches data from the API using a double-checked locking pattern
+    to prevent race conditions.
+    """
+    global last_fetch, cached_metrics
+
+    if cached_metrics and last_fetch and (datetime.now() - last_fetch).total_seconds() < CACHE_DURATION:
+        logger.info("CACHE HIT - returning cached data (fast path)")
+        return cached_metrics
+
+    async with cache_lock:
+        if cached_metrics and last_fetch and (datetime.now() - last_fetch).total_seconds() < CACHE_DURATION:
+            logger.info("CACHE HIT - returning cached data (after waiting for lock)")
+            return cached_metrics
+
+        logger.info("CACHE MISS - fetching new data")
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(VAULT_API_URL)
+                response.raise_for_status()
+                vault_data = response.json()
+
+            # Format the data (your existing logic is fine)
+            total_tvl = sum(float(v.get("total_assets", 0)) for v in vault_data if isinstance(v.get("total_assets"), (str, int, float)))
+            tvl_formatted = f"${total_tvl:,.2f}"
+            protocol_lines = []
+            if total_tvl > 0:
+                for vault in vault_data:
+                    name = f"{vault.get('protocol', 'N/A')} {vault.get('token', 'N/A')}"
+                    tvl_val = float(vault.get("total_assets", 0))
+                    percent = (tvl_val / total_tvl * 100)
+                    protocol_lines.append(f"• {name}: ${tvl_val:,.2f} ({percent:.1f}%)")
+            
+            result = (
+                "<b>📊 Sentient Metrics</b>\n\n"
+                "<b>General Metrics:</b>\n"
+                f"• TVL: {tvl_formatted}\n\n"
+                "<b>Our Distribution:</b>\n" + "\n".join(protocol_lines)
+            )
+
+            # Update the cache
+            cached_metrics = result
+            last_fetch = datetime.now()
+            return result
+
+        except Exception as e:
+            logger.error(f"Failed to get metrics data: {e}", exc_info=True)
+            # Return old data if we have it, otherwise return error
+            if cached_metrics:
+                logger.info("API failed, returning stale cached data as fallback")
+                return cached_metrics
+            return "😕 Sorry, I couldn't fetch the metrics right now. Please try again later."
 
 async def show_metrics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
