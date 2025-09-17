@@ -278,6 +278,28 @@ def format_rebalancing_message(rebalance_event: dict) -> str | None:
 async def handle_generic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("I don't understand that. Please use the '📊 Sentient Metrics' button.")
 
+async def broadcast_rebalance_message(application: Application, message: str):
+    """Sends a message to all subscribed users."""
+    logger.debug("BROADCAST: Getting database session...")
+    db = next(get_db())
+    try:
+        logger.debug("BROADCAST: Fetching all user IDs from DB...")
+        user_ids = await asyncio.to_thread(crud.get_all_user_ids, db)
+        logger.info(f"BROADCAST: Found {len(user_ids)} users to notify.")
+    finally:
+        db.close()
+    
+    if not user_ids:
+        logger.warning("BROADCAST: No users found, skipping broadcast.")
+        return
+
+    logger.info(f"BROADCAST: Sending message to {len(user_ids)} users concurrently...")
+    tasks = [application.bot.send_message(chat_id=uid, text=message, parse_mode='Markdown') for uid in user_ids]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    success_count = sum(1 for res in results if not isinstance(res, Exception))
+    logger.info(f"BROADCAST: Finished. {success_count}/{len(user_ids)} messages sent successfully.")
+
 async def check_and_notify_rebalance(application: Application):
     """The core logic that checks for new rebalances and triggers notifications."""
     logger.info("BACKGROUND TASK: Checking for new rebalance event...")
@@ -293,14 +315,15 @@ async def check_and_notify_rebalance(application: Application):
             latest_event = response.json()[0]
         
         latest_rebalance_id = latest_event['rebalance_id']
+        logger.info(f"Latest rebalance event ID: {latest_rebalance_id}")
 
         # Check if we've already processed this event
+        logger.debug(f"CHECKER: Checking database for event ID {latest_rebalance_id}...")
         event_exists = await asyncio.to_thread(crud.get_rebalance_event_by_rebalance_id, db, latest_rebalance_id)
         if event_exists:
             logger.info("No new rebalance event found.")
             return
-
-        logger.info(f"New rebalance event found: {latest_rebalance_id}")
+        logger.info(f"CHECKER: New rebalance event found: {latest_rebalance_id}. Preparing notification.")
         message = format_rebalancing_message(latest_event)
         if message:
             await broadcast_rebalance_message(application, message)
