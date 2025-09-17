@@ -289,3 +289,25 @@ def remove_user_endpoint(chat_id: int, db: Session = Depends(get_db)):
     if not was_removed:
         raise HTTPException(status_code=404, detail="User not found")
     return None
+
+@app.get("/rebalance-events/{rebalance_id}", response_model=schemas.RebalanceEvent)
+def read_rebalance_event(rebalance_id: str, db: Session = Depends(get_db)):
+    """
+    Checks if a rebalance event exists by its rebalance_id.
+    Returns the event if found, otherwise returns a 404 error.
+    """
+    db_event = crud.get_rebalance_event_by_rebalance_id(db, rebalance_id=rebalance_id)
+    if db_event is None:
+        raise HTTPException(status_code=404, detail="Rebalance event not found")
+    return db_event
+
+@app.post("/rebalance-events/", response_model=schemas.RebalanceEvent, status_code=201)
+def create_rebalance_event(event: schemas.RebalanceEventCreate, db: Session = Depends(get_db)):
+    """
+    Creates a new rebalance event record.
+    Prevents creating duplicates.
+    """
+    db_event = crud.get_rebalance_event_by_rebalance_id(db, rebalance_id=event.rebalance_id)
+    if db_event:
+        raise HTTPException(status_code=409, detail="Rebalance event already exists")
+    return crud.create_rebalance_event(db=db, event=event)

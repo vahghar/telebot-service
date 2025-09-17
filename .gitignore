@@ -7,4 +7,5 @@ apy_listener.py
 telebot.py
 abi
 
-load_text.py
+load_test.py
+alembic

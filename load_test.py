@@ -35,6 +35,7 @@ async def main():
     await asyncio.gather(*tasks)
     
     print("\n--- Simulation finished ---")
+    
 
 if __name__ == "__main__":
     # This ensures the cache is populated before the test

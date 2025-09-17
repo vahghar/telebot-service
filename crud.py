@@ -32,3 +32,22 @@ def remove_user(db: Session, chat_id: int) -> bool:
         db.commit()
         return True
     return False
+
+def get_rebalance_event_by_rebalance_id(db: Session, rebalance_id: str) -> models.RebalanceEvent | None:
+    """
+    Checks if a RebalanceEvent with the given rebalance_id exists in the DB.
+    """
+    return db.query(models.RebalanceEvent).filter(models.RebalanceEvent.rebalance_id == rebalance_id).first()
+
+def create_rebalance_event(db: Session, event: schemas.RebalanceEventCreate) -> models.RebalanceEvent:
+    """
+    Creates a new RebalanceEvent record in the DB.
+    """
+    db_event = models.RebalanceEvent(
+        rebalance_id=event.rebalance_id,
+        transaction_hash=event.transaction_hash
+    )
+    db.add(db_event)
+    db.commit()
+    db.refresh(db_event)
+    return db_event
