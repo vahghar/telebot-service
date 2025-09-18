@@ -9,3 +9,5 @@ abi
 
 load_test.py
 alembic
+
+seed.py
