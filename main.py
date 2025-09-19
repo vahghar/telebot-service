@@ -60,7 +60,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db_user, created = crud.get_or_create_user(db, user_schema)
         if created:
             message_text = (
-                "🤖 Welcome to Sentient AI!\n\n"
+                "🤖 Welcome to Neura Vault!\n\n"
                 "You are now subscribed. Tap the button below to get your first metrics update."
             )
         else:
@@ -72,13 +72,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db_user, created = crud.get_or_create_user(db, user_schema)
         if created:
             message_text = (
-                "🤖 Welcome to Sentient AI!\n\n"
+                "🤖 Welcome to Neura Vault!\n\n"
                 "You are now subscribed. Tap the button below to get your first metrics update."
             )
         else:
             message_text = "👋 Welcome back! Tap the button for the latest metrics."
 
-    keyboard = [[InlineKeyboardButton("📊 Sentient Metrics", callback_data='show_metrics')]]
+    keyboard = [[InlineKeyboardButton("📊 Neura Metrics", callback_data='show_metrics')]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(message_text, reply_markup=reply_markup)
 
@@ -203,7 +203,7 @@ async def get_metrics_text() -> str:
                     protocol_lines.append(f"• {name}: ${tvl_val:,.2f} ({percent:.1f}%)")
             
             result = (
-                "<b>📊 Sentient Metrics</b>\n\n"
+                "<b>📊 Neura Metrics</b>\n\n"
                 "<b>General Metrics:</b>\n"
                 f"• TVL: {tvl_formatted}\n\n"
                 "<b>Our Distribution:</b>\n" + "\n".join(protocol_lines)
@@ -233,7 +233,7 @@ async def show_metrics_callback(update: Update, context: ContextTypes.DEFAULT_TY
     #await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
     metrics_text = await get_metrics_text()
 
-    permanent_keyboard = [[KeyboardButton("📊 Sentient Metrics")]]
+    permanent_keyboard = [[KeyboardButton("📊 Neura Metrics")]]
     permanent_reply_markup = ReplyKeyboardMarkup(permanent_keyboard, resize_keyboard=True)
 
     await query.message.reply_text(
@@ -267,7 +267,7 @@ def format_rebalancing_message(rebalance_event: dict) -> str | None:
             f"**To:** `{to_protocol}`\n\n"
             f"**Reason:**\n"
             f"> {strategy_summary}\n\n"
-            f"Automated by Sentient.\n"
+            f"Automated by Neura.\n"
             f"[View Transaction]({tx_link})"
         )
         return message
@@ -276,7 +276,7 @@ def format_rebalancing_message(rebalance_event: dict) -> str | None:
         return None
 
 async def handle_generic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("I don't understand that. Please use the '📊 Sentient Metrics' button.")
+    await update.message.reply_text("I don't understand that. Please use the '📊 Neura Metrics' button.")
 
 async def broadcast_rebalance_message(application: Application, message: str):
     """Sends a message to all subscribed users."""
@@ -343,7 +343,8 @@ async def check_and_notify_rebalance(application: Application):
 async def run_rebalance_check_periodically(application: Application):
     """The background task that runs indefinitely."""
     while True:
-        await check_and_notify_rebalance(application)
+        #await check_and_notify_rebalance(application)
+        await check_and_notify_rebalance_mock(application)
         logger.info(f"BACKGROUND TASK: Sleeping for {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
         await asyncio.sleep(REBALANCE_CHECK_INTERVAL_SECONDS)
 
@@ -354,7 +355,7 @@ async def lifespan(app: FastAPI):
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(show_metrics_callback, pattern='^show_metrics$'))
-    application.add_handler(MessageHandler(filters.Text(["📊 Sentient Metrics"]), show_metrics_from_text))
+    application.add_handler(MessageHandler(filters.Text(["📊 Neura Metrics"]), show_metrics_from_text))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_generic_message))
 
     await application.initialize()
