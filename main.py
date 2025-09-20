@@ -343,8 +343,7 @@ async def check_and_notify_rebalance(application: Application):
 async def run_rebalance_check_periodically(application: Application):
     """The background task that runs indefinitely."""
     while True:
-        #await check_and_notify_rebalance(application)
-        await check_and_notify_rebalance_mock(application)
+        await check_and_notify_rebalance(application)
         logger.info(f"BACKGROUND TASK: Sleeping for {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
         await asyncio.sleep(REBALANCE_CHECK_INTERVAL_SECONDS)
 
