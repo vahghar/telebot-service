@@ -313,7 +313,14 @@ async def check_and_notify_rebalance(application: Application):
             if response.status_code != 200:
                 logger.error(f"Yield API Error: {response.status_code}")
                 return
-            latest_event = response.json()[0]
+            events = response.json()
+            if not events:
+                logger.info("List is empty.")
+                return
+            if response.status_code != 200:
+                logger.error(f"Yield API Error: {response.status_code}")
+                return
+            latest_event = events[0]
         
         latest_rebalance_id = latest_event['rebalance_id']
         logger.info(f"Latest rebalance event ID: {latest_rebalance_id}")
