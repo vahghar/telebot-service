@@ -44,7 +44,7 @@ def get_db():
 
 # --- TELEGRAM BOT SETUP ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-VAULT_API_URL = os.getenv("VAULT_API_URL")
+#VAULT_API_URL = os.getenv("VAULT_API_URL")
 YIELD_API_URL = os.getenv("YIELD_API_URL")
 REBALANCE_CHECK_INTERVAL_SECONDS = int(os.getenv("REBALANCE_CHECK_INTERVAL_SECONDS", 60))
 
@@ -185,9 +185,10 @@ async def get_metrics_text() -> str:
             return cached_metrics
 
         logger.info("CACHE MISS - fetching new data")
+        api_url = f"{YIELD_API_URL}/api/vault/price/"
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.get(VAULT_API_URL)
+                response = await client.get(api_url)
                 response.raise_for_status()
                 vault_data = response.json()
 
