@@ -82,92 +82,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(message_text, reply_markup=reply_markup)
 
-'''
-async def get_metrics_text() -> str:
-    """Fetches data from the API and formats it into a string. Returns an error string on failure."""
-    if cached_metrics and last_fetch and (datetime.now() - last_fetch).seconds < CACHE_DURATION:
-        return cached_metrics
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(VAULT_API_URL)
-            response.raise_for_status()
-            vault_data = response.json()
-
-            total_tvl = sum(float(v.get("total_assets", 0)) for v in vault_data if isinstance(v.get("total_assets"), (str, int, float)))
-            tvl_formatted = f"${total_tvl:,.2f}"
-
-            protocol_lines = []
-            if total_tvl > 0:
-                for vault in vault_data:
-                    name = f"{vault.get('protocol', 'N/A')} {vault.get('token', 'N/A')}"
-                    tvl_val = float(vault.get("total_assets", 0))
-                    percent = (tvl_val / total_tvl * 100)
-                    protocol_lines.append(f"• {name}: ${tvl_val:,.2f} ({percent:.1f}%)")
-
-            return (
-                "<b>📊 Sentient Metrics</b>\n\n"
-                "<b>General Metrics:</b>\n"
-                f"• TVL: {tvl_formatted}\n\n"
-                "<b>Our Distribution:</b>\n" + "\n".join(protocol_lines)
-            )
-    except Exception as e:
-        logger.error(f"Failed to get metrics data: {e}", exc_info=True)
-        return "😕 Sorry, I couldn't fetch the metrics right now. Please try again later."
-'''
-
-'''
-async def get_metrics_text() -> str:
-    """Fetches data from the API and formats it into a string. Returns an error string on failure."""
-    global last_fetch, cached_metrics
-    async with cache_lock:
-        if cached_metrics and last_fetch and (datetime.now() - last_fetch).total_seconds() < CACHE_DURATION:
-            logger.info("CACHE HIT - returning cached data")
-            return cached_metrics
-    
-    logger.info("CACHE MISS - fetching new data")
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(VAULT_API_URL)
-            response.raise_for_status()
-            vault_data = response.json()
-
-            total_tvl = sum(float(v.get("total_assets", 0)) for v in vault_data if isinstance(v.get("total_assets"), (str, int, float)))
-            tvl_formatted = f"${total_tvl:,.2f}"
-
-            protocol_lines = []
-            if total_tvl > 0:
-                for vault in vault_data:
-                    name = f"{vault.get('protocol', 'N/A')} {vault.get('token', 'N/A')}"
-                    tvl_val = float(vault.get("total_assets", 0))
-                    percent = (tvl_val / total_tvl * 100)
-                    protocol_lines.append(f"• {name}: ${tvl_val:,.2f} ({percent:.1f}%)")
-
-            result = (
-                "<b>📊 Sentient Metrics</b>\n\n"
-                "<b>General Metrics:</b>\n"
-                f"• TVL: {tvl_formatted}\n\n"
-                "<b>Our Distribution:</b>\n" + "\n".join(protocol_lines)
-            )
-            
-            async with cache_lock:
-                cached_metrics = result
-                last_fetch = datetime.now()
-            
-            return result
-            
-    except Exception as e:
-        logger.error(f"Failed to get metrics data: {e}", exc_info=True)
-    
-        async with cache_lock:
-            if cached_metrics:
-                logger.info("API failed, returning stale cached data as fallback")
-                return cached_metrics
-    
-        return "😕 Sorry, I couldn't fetch the metrics right now. Please try again later."
-'''
-
-# In your main.py file, replace the old function with this one.
-
 async def get_metrics_text() -> str:
     """
     Fetches data from the API using a double-checked locking pattern
@@ -258,7 +172,12 @@ def format_rebalancing_message(rebalance_event: dict) -> str | None:
         token_symbol = rebalance_event['token_symbol']
         from_protocol = rebalance_event['from_protocol']
         to_protocol = rebalance_event['to_protocol']
-        tx_hash = rebalance_event['deposit_transaction']['transaction_hash']
+        #tx_hash = rebalance_event['deposit_transaction']['transaction_hash']
+
+        deposit_hash = rebalance_event.get('deposit_transaction', {}).get('transaction_hash')
+        withdraw_hash = rebalance_event.get('withdrawal_transaction', {}).get('transaction_hash')
+        tx_hash = deposit_hash or withdraw_hash
+
         strategy_summary = rebalance_event.get('strategy_summary', 'No summary provided.').strip().strip('"')
         tx_link = f"https://hyperevmscan.io/tx/0x{tx_hash}"
         message = (
@@ -306,6 +225,8 @@ async def check_and_notify_rebalance(application: Application):
     logger.info("BACKGROUND TASK: Checking for new rebalance event...")
     api_url = f"{YIELD_API_URL}/api/vault/rebalances/combined/"
     params = {"page_size": 1}
+    #with open("mock_rebalance.json", "r") as f:
+    #    events = json.load(f)
     db = next(get_db())
     try:
         async with httpx.AsyncClient() as client:
@@ -328,20 +249,39 @@ async def check_and_notify_rebalance(application: Application):
         # Check if we've already processed this event
         logger.debug(f"CHECKER: Checking database for event ID {latest_rebalance_id}...")
         event_exists = await asyncio.to_thread(crud.get_rebalance_event_by_rebalance_id, db, latest_rebalance_id)
+        
         if event_exists:
             logger.info("No new rebalance event found.")
             return
-        logger.info(f"CHECKER: New rebalance event found: {latest_rebalance_id}. Preparing notification.")
-        message = format_rebalancing_message(latest_event)
-        if message:
-            await broadcast_rebalance_message(application, message)
+
+        should_notify = True
+        if latest_event.get('status') == 'failed':
+            logger.warning(f"Rebalance event {latest_rebalance_id} has a 'failed' status. Skipping notification.")
+            should_notify = False
+
+        if should_notify:
+            logger.info(f"CHECKER: New successful rebalance event found: {latest_rebalance_id}. Preparing notification.")
+            message = format_rebalancing_message(latest_event)
+            if message:
+                await broadcast_rebalance_message(application, message)
+        #logger.info(f"CHECKER: New rebalance event found: {latest_rebalance_id}. Preparing notification.")
+        #message = format_rebalancing_message(latest_event)
+        #if message:
+        #    await broadcast_rebalance_message(application, message)
             # After sending, save the record to the database
-            event_to_create = schemas.RebalanceEventCreate(
-                rebalance_id=latest_rebalance_id,
-                transaction_hash=latest_event['deposit_transaction']['transaction_hash']
-            )
-            await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
-            logger.info(f"Successfully processed and saved event {latest_rebalance_id}.")
+        #    event_to_create = schemas.RebalanceEventCreate(
+        #        rebalance_id=latest_rebalance_id, 
+        #        transaction_hash=latest_event['deposit_transaction']['transaction_hash']
+        #    )
+        #    await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
+        #    logger.info(f"Successfully processed and saved event {latest_rebalance_id}.")
+
+        event_to_create = schemas.RebalanceEventCreate(
+            rebalance_id=latest_rebalance_id,
+            transaction_hash=latest_event['deposit_transaction']['transaction_hash']
+        )
+        await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
+        logger.info(f"Successfully processed and saved event {latest_rebalance_id} to the database.")
 
     except (httpx.RequestError, IndexError, KeyError) as e:
         logger.error(f"Error during rebalance check: {e}")
@@ -417,3 +357,4 @@ def create_rebalance_event(event: schemas.RebalanceEventCreate, db: Session = De
     if db_event:
         raise HTTPException(status_code=409, detail="Rebalance event already exists")
     return crud.create_rebalance_event(db=db, event=event)
+
