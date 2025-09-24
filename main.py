@@ -1,17 +1,21 @@
 import os
 import asyncio
 import json
-from typing import List
+from typing import List, Dict, Any
 import logging
 from contextlib import asynccontextmanager
 from database import get_async_db
 
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Request
 from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 
 from telegram.constants import ChatAction 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
+
+from arq import create_pool
+from arq.connections import ArqRedis, RedisSettings
 
 import httpx
 import crud
@@ -35,6 +39,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 models.Base.metadata.create_all(bind=engine)
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+REDIS_SETTINGS = RedisSettings.from_dsn(REDIS_URL)
+
 def get_db():
     db = SessionLocal()
     try:
@@ -42,11 +49,16 @@ def get_db():
     finally:
         db.close()
 
+async def get_async_db_session():
+    async with get_async_db() as session:
+        yield session
+
 # --- TELEGRAM BOT SETUP ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 #VAULT_API_URL = os.getenv("VAULT_API_URL")
 YIELD_API_URL = os.getenv("YIELD_API_URL")
 REBALANCE_CHECK_INTERVAL_SECONDS = int(os.getenv("REBALANCE_CHECK_INTERVAL_SECONDS", 60))
+WEBHOOK_API_KEY = os.getenv("WEBHOOK_API_KEY", "your-secret-key-here") 
 
 if not TELEGRAM_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN environment variable not set!")
@@ -198,6 +210,7 @@ def format_rebalancing_message(rebalance_event: dict) -> str | None:
 async def handle_generic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text("I don't understand that. Please use the '📊 Neura Metrics' button.")
 
+'''
 async def broadcast_rebalance_message(application: Application, message: str):
     """Sends a message to all subscribed users."""
     logger.debug("BROADCAST: Getting database session...")
@@ -219,7 +232,26 @@ async def broadcast_rebalance_message(application: Application, message: str):
     
     success_count = sum(1 for res in results if not isinstance(res, Exception))
     logger.info(f"BROADCAST: Finished. {success_count}/{len(user_ids)} messages sent successfully.")
+'''
 
+async def broadcast_rebalance_message(application: Application, message: str):
+    logger.info("BROADCAST: Starting broadcast...")
+    async with get_async_db() as db:
+        user_ids = await asyncio.to_thread(crud.get_all_user_ids, db)
+        logger.info(f"BROADCAST: Found {len(user_ids)} users to notify.")
+    
+    if not user_ids:
+        logger.warning("BROADCAST: No users found, skipping broadcast.")
+        return
+
+    tasks = [application.bot.send_message(chat_id=uid, text=message, parse_mode='Markdown') for uid in user_ids]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    success_count = sum(1 for res in results if not isinstance(res, Exception))
+    failure_count = len(results) - success_count
+    logger.info(f"BROADCAST: Finished. Success: {success_count}, Failures: {failure_count}.")
+
+'''
 async def check_and_notify_rebalance(application: Application):
     """The core logic that checks for new rebalances and triggers notifications."""
     logger.info("BACKGROUND TASK: Checking for new rebalance event...")
@@ -294,12 +326,15 @@ async def run_rebalance_check_periodically(application: Application):
         await check_and_notify_rebalance(application)
         logger.info(f"BACKGROUND TASK: Sleeping for {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
         await asyncio.sleep(REBALANCE_CHECK_INTERVAL_SECONDS)
+'''
 
+'''
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("FastAPI app starting up...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
+    app.state.telegram_application = application
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CallbackQueryHandler(show_metrics_callback, pattern='^show_metrics$'))
     application.add_handler(MessageHandler(filters.Text(["📊 Neura Metrics"]), show_metrics_from_text))
@@ -308,23 +343,155 @@ async def lifespan(app: FastAPI):
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-    logger.info("Telegram bot is running in the background.")
-    logger.info(f"Starting periodic rebalance checker. Interval: {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
-    rebalance_task = asyncio.create_task(run_rebalance_check_periodically(application))
+
+    
+    #logger.info("Telegram bot is running in the background.")
+    #logger.info(f"Starting periodic rebalance checker. Interval: {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
+    #rebalance_task = asyncio.create_task(run_rebalance_check_periodically(application))
+
     yield
     logger.info("FastAPI app shutting down...")
-    rebalance_task.cancel()
+    #rebalance_task.cancel()
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
     logger.info("Telegram bot has been shut down.")
+'''
+
+#updated using redis, currently being tested
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("FastAPI app starting up...")
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    
+    redis_pool = await create_pool(REDIS_SETTINGS)
+    app.state.redis = redis_pool
+
+    app.state.telegram_application = application
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(show_metrics_callback, pattern='^show_metrics$'))
+    application.add_handler(MessageHandler(filters.Text(["📊 Neura Metrics"]), show_metrics_from_text))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_generic_message))
+
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    '''
+    logger.info("Telegram bot is running in the background.")
+    logger.info(f"Starting periodic rebalance checker. Interval: {REBALANCE_CHECK_INTERVAL_SECONDS} seconds.")
+    rebalance_task = asyncio.create_task(run_rebalance_check_periodically(application))
+    '''
+
+    yield
+    logger.info("FastAPI app shutting down...")
+    await app.state.redis.close()
+    #rebalance_task.cancel()
+    await application.updater.stop()
+    await application.stop()
+    await application.shutdown()
+    logger.info("Telegram bot has been shut down.")
+
+async def get_redis(request: Request) -> ArqRedis:
+    return request.app.state.redis
 
 app = FastAPI(
     lifespan=lifespan,
     title="Telegram User API & Bot"
 )
 
-# --- API ENDPOINTS (Unchanged) ---
+class RebalanceWebhookPayload(BaseModel):
+    rebalance_id: str
+    amount_token: float
+    token_symbol: str
+    from_protocol: str
+    to_protocol: str
+    deposit_transaction: Dict[str, Any]
+    withdrawal_transaction: Dict[str, Any] | None = None
+    strategy_summary: str | None = "No summary provided."
+    status: str
+
+async def get_api_key(x_api_key: str = Header()):
+    if x_api_key != WEBHOOK_API_KEY:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API Key")
+    return x_api_key
+
+'''
+@app.post("/webhook/rebalance", status_code=status.HTTP_202_ACCEPTED, tags=["Webhook"])
+async def receive_rebalance_notification(
+    payload: RebalanceWebhookPayload,
+    request: Request,
+    #db: Session = Depends(get_db),
+    db: Session = Depends(get_async_db_session),
+    api_key: str = Depends(get_api_key) # Secure the endpoint
+):
+    """
+    Receives a rebalance event from the main backend, processes it,
+    and broadcasts a notification to all subscribed Telegram users.
+    """
+    logger.info(f"WEBHOOK: Received new rebalance event ID: {payload.rebalance_id}")
+
+    # 1. Check if event was already processed
+    event_exists = await asyncio.to_thread(crud.get_rebalance_event_by_rebalance_id, db, payload.rebalance_id)
+    if event_exists:
+        logger.warning(f"WEBHOOK: Event {payload.rebalance_id} already processed. Ignoring.")
+        # Return 200 OK because the event is known, no need for the sender to retry.
+        return {"status": "event already processed"}
+
+    # 2. Check if the event failed
+    if payload.status == 'failed':
+        logger.warning(f"Rebalance event {payload.rebalance_id} has a 'failed' status. Skipping notification.")
+        # Still save it to the DB to prevent reprocessing
+        event_to_create = schemas.RebalanceEventCreate(
+            rebalance_id=payload.rebalance_id,
+            transaction_hash="FAILED_EVENT" # Or extract hash if available
+        )
+        await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
+        return {"status": "failed event logged, notification skipped"}
+
+    # 3. Format the message
+    # Pydantic model ensures the dict has the right keys, so we can convert it
+    message = format_rebalancing_message(payload.dict())
+    if not message:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to format message from payload data.")
+
+    # 4. Broadcast the message
+    telegram_app: Application = request.app.state.telegram_application
+    await broadcast_rebalance_message(telegram_app, message)
+
+    # 5. Save the event to the database to prevent duplicates
+    tx_hash = payload.deposit_transaction.get('transaction_hash') or \
+              (payload.withdrawal_transaction.get('transaction_hash') if payload.withdrawal_transaction else None)
+
+    if not tx_hash:
+         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Transaction hash is missing in the payload.")
+
+    event_to_create = schemas.RebalanceEventCreate(
+        rebalance_id=payload.rebalance_id,
+        transaction_hash=tx_hash
+    )
+    await asyncio.to_thread(crud.create_rebalance_event, db, event_to_create)
+    logger.info(f"Successfully processed and saved event {payload.rebalance_id}.")
+
+    return {"status": "notification broadcasted successfully"}
+'''
+
+#updated endpoint using redis
+@app.post("/webhook/rebalance", status_code=status.HTTP_202_ACCEPTED, tags=["Webhook"])
+async def receive_rebalance_notification(
+    payload: RebalanceWebhookPayload,
+    redis: ArqRedis = Depends(get_redis), # Inject the Redis pool
+    api_key: str = Depends(get_api_key)
+):
+    """
+    This endpoint now just validates the data and queues a job.
+    """
+    logger.info(f"WEBHOOK: Queuing job for rebalance event ID: {payload.rebalance_id}")
+
+    await redis.enqueue_job('process_rebalance', payload.dict())
+
+    return {"status": "event accepted and queued"}
+
 @app.get("/users/ids/", response_model=List[int], tags=["Users"])
 def get_all_user_ids_endpoint(db: Session = Depends(get_db)):
     return crud.get_all_user_ids(db)
