@@ -14,8 +14,8 @@ from telegram.constants import ChatAction
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
-from arq import create_pool
-from arq.connections import ArqRedis, RedisSettings
+# from arq import create_pool
+# from arq.connections import ArqRedis, RedisSettings
 
 import httpx
 import crud
@@ -39,8 +39,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 models.Base.metadata.create_all(bind=engine)
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
-REDIS_SETTINGS = RedisSettings.from_dsn(REDIS_URL)
+# REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+# REDIS_SETTINGS = RedisSettings.from_dsn(REDIS_URL)
 
 def get_db():
     db = SessionLocal()
@@ -364,8 +364,8 @@ async def lifespan(app: FastAPI):
     logger.info("FastAPI app starting up...")
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    redis_pool = await create_pool(REDIS_SETTINGS)
-    app.state.redis = redis_pool
+    #redis_pool = await create_pool(REDIS_SETTINGS)
+    #app.state.redis = redis_pool
 
     app.state.telegram_application = application
     application.add_handler(CommandHandler("start", start))
@@ -385,15 +385,17 @@ async def lifespan(app: FastAPI):
 
     yield
     logger.info("FastAPI app shutting down...")
-    await app.state.redis.close()
+    # await app.state.redis.close()
     #rebalance_task.cancel()
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
     logger.info("Telegram bot has been shut down.")
 
+'''
 async def get_redis(request: Request) -> ArqRedis:
     return request.app.state.redis
+'''
 
 app = FastAPI(
     lifespan=lifespan,
@@ -477,6 +479,7 @@ async def receive_rebalance_notification(
 '''
 
 #updated endpoint using redis
+'''
 @app.post("/webhook/rebalance", status_code=status.HTTP_202_ACCEPTED, tags=["Webhook"])
 async def receive_rebalance_notification(
     payload: RebalanceWebhookPayload,
@@ -491,6 +494,69 @@ async def receive_rebalance_notification(
     await redis.enqueue_job('process_rebalance', payload.dict())
 
     return {"status": "event accepted and queued"}
+'''
+@app.post("/webhook/rebalance", status_code=status.HTTP_202_ACCEPTED, tags=["Webhook"])
+async def receive_rebalance_notification(
+    payload: RebalanceWebhookPayload,
+    request: Request,
+    db: Session = Depends(get_db),
+    api_key: str = Depends(get_api_key)
+):
+    """
+    Receives a rebalance event from the main backend, processes it,
+    and broadcasts a notification to all subscribed Telegram users.
+    """
+    logger.info(f"WEBHOOK: Received new rebalance event ID: {payload.rebalance_id}")
+
+    # 1. Check if event was already processed
+    event_exists = crud.get_rebalance_event_by_rebalance_id(db, payload.rebalance_id)
+    if event_exists:
+        logger.warning(f"WEBHOOK: Event {payload.rebalance_id} already processed. Ignoring.")
+        return {"status": "event already processed"}
+
+    # 2. Check if the event failed
+    if payload.status == 'failed':
+        logger.warning(f"Rebalance event {payload.rebalance_id} has a 'failed' status. Skipping notification.")
+        # Still save it to the DB to prevent reprocessing
+        event_to_create = schemas.RebalanceEventCreate(
+            rebalance_id=payload.rebalance_id,
+            transaction_hash="FAILED_EVENT"
+        )
+        crud.create_rebalance_event(db, event_to_create)
+        return {"status": "failed event logged, notification skipped"}
+
+    # 3. Format the message
+    message = format_rebalancing_message(payload.dict())
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Failed to format message from payload data."
+        )
+
+    # 4. Broadcast the message
+    telegram_app = request.app.state.telegram_application
+    await broadcast_rebalance_message(telegram_app, message)
+
+    # 5. Save the event to the database to prevent duplicates
+    tx_hash = payload.deposit_transaction.get('transaction_hash') or \
+            (payload.withdrawal_transaction.get('transaction_hash') 
+               if payload.withdrawal_transaction else None)
+
+    if not tx_hash:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Transaction hash is missing in the payload."
+        )
+
+    event_to_create = schemas.RebalanceEventCreate(
+        rebalance_id=payload.rebalance_id,
+        transaction_hash=tx_hash
+    )
+    crud.create_rebalance_event(db, event_to_create)
+    logger.info(f"Successfully processed and saved event {payload.rebalance_id}.")
+
+    return {"status": "notification broadcasted successfully"}
+
 
 @app.get("/users/ids/", response_model=List[int], tags=["Users"])
 def get_all_user_ids_endpoint(db: Session = Depends(get_db)):
